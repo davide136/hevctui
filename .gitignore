@@ -1,0 +1,6 @@
+target/
+*.exe
+.kangentic/
+.claude/
+kangentic.json
+kangentic.local.json
