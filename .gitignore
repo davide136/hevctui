@@ -4,3 +4,4 @@ target/
 .claude/
 kangentic.json
 kangentic.local.json
+dist/

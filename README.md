@@ -4,6 +4,8 @@ App desktop (Rust, egui) che ricomprime in HEVC una libreria media (anche su NAS
 
 Salta i file già HEVC/AV1 e quelli sotto la soglia di bitrate: ricomprimere file già efficienti non fa risparmiare. Prima di ogni encode può stimare il risparmio su pochi spezzoni e tenere l'originale se non conviene.
 
+- **Installazione:** scarica `hevctui-setup-x.y.z.exe` dalle [Releases](https://github.com/davide136/hevctui/releases). Installa per l'utente corrente (senza diritti di amministratore) in `%LOCALAPPDATA%\Programs\hevctui` e aggiunge la voce nel menu Start e in App installate.
+- **Aggiornamenti:** l'app controlla le release all'avvio (disattivabile) o con Impostazioni → Controlla ora. Con "⬆ Aggiorna" scarica il setup, ne verifica lo SHA-256, si chiude e si riavvia aggiornata. Non si può aggiornare mentre è in corso un encode.
 - **Uso:** `hevctui.exe` apre la GUI; `hevctui.exe scan` da terminale aggiorna l'indice e stampa il riepilogo senza GUI.
 - **Impostazioni:** tutte dalla GUI (⚙ Impostazioni): cartelle da scansionare (Film/Serie), parametri NVENC, soglie, stima a campioni, scansione, percorsi di ffmpeg/ffprobe. Al primo avvio la lista cartelle è vuota.
 - **ffmpeg/ffprobe:** per default cercati nel `PATH`; in alternativa si indica il percorso completo dalla GUI. Serve una build con `hevc_nvenc`.
@@ -19,3 +21,12 @@ cargo build --release
 ```
 
 `eframe` è fissato a `=0.36.1` con renderer **wgpu**: con glow la finestra può restare bianca su PC con doppia GPU.
+
+## Release
+
+Requisiti: [Inno Setup 6](https://jrsoftware.org/isinfo.php) e `gh` autenticato. Alza `version` in `Cargo.toml`, committa, poi:
+
+```powershell
+.\scripts\release.ps1             # build, setup in dist\, push e release vX.Y.Z su GitHub
+.\scripts\release.ps1 -NoPublish  # solo build e setup
+```

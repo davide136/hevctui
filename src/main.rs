@@ -3,6 +3,7 @@
 #![windows_subsystem = "windows"]
 
 mod core;
+mod update;
 
 const MAX_WORKERS: usize = 4;
 
@@ -14,6 +15,7 @@ use eframe::egui::{self, Color32, RichText};
 use egui_extras::{Column, TableBuilder};
 
 use crate::core::*;
+use crate::update::{UpdateState, CURRENT};
 
 #[cfg(windows)]
 fn attach_console() {
@@ -21,7 +23,17 @@ fn attach_console() {
     unsafe { AttachConsole(u32::MAX); } // ATTACH_PARENT_PROCESS
 }
 
+/// Mutex con nome tenuto per tutta la vita del processo: il setup lo usa per aspettare la chiusura.
+#[cfg(windows)]
+fn hold_running_mutex() {
+    extern "system" { fn CreateMutexW(attrs: *const std::ffi::c_void, owner: i32, name: *const u16) -> *mut std::ffi::c_void; }
+    let name: Vec<u16> = update::MUTEX_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()); }
+}
+
 fn main() -> eframe::Result {
+    #[cfg(windows)]
+    hold_running_mutex();
     let cfg = load_config();
     if std::env::args().any(|a| a == "scan") {
         #[cfg(windows)]
@@ -33,7 +45,7 @@ fn main() -> eframe::Result {
     let mut st = State {
         cfg: cfg.clone(), files: load_library(&cfg), running: false, quit: false, jobs: vec![],
         skip: Default::default(), scanning: true, scan_done: 0, scan_total: 0, first_scan_done: false,
-        rescan_now: false,
+        rescan_now: false, update: UpdateState::Idle,
         log: std::fs::read_to_string(log_path()).unwrap_or_default().lines().rev().take(100).collect::<Vec<_>>()
             .into_iter().rev().map(String::from).collect(),
     };
@@ -41,6 +53,7 @@ fn main() -> eframe::Result {
     let shared: Shared = Arc::new(Mutex::new(st));
     { let s = shared.clone(); thread::spawn(move || refresh_loop(s)); }
     for slot in 0..MAX_WORKERS { let s = shared.clone(); thread::spawn(move || encode_worker(s, slot)); }
+    if cfg.auto_update_check { update::spawn_check(shared.clone()); }
 
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("hevctui").with_inner_size([1280.0, 800.0]).with_min_inner_size([900.0, 500.0]),
@@ -97,7 +110,12 @@ struct Gui {
     ffprobe_buf: String,
     ffmpeg_ok: bool,
     ffprobe_ok: bool,
+    // azione richiesta dalla UI, eseguita a lock rilasciato (i thread di update bloccano `Shared`)
+    update_action: Option<UpdateAction>,
+    closing: bool,
 }
+
+enum UpdateAction { Check, Install(update::Release) }
 
 impl Gui {
     fn new(st: Shared) -> Self {
@@ -107,7 +125,7 @@ impl Gui {
               folder_bufs: cfg.folders.iter().map(|d| d.path.clone()).collect(),
               exts_buf: cfg.video_exts.join(", "), codecs_buf: cfg.encode_codecs.join(", "),
               ffmpeg_ok: tool_ok(&cfg.ffmpeg), ffprobe_ok: tool_ok(&cfg.ffprobe),
-              ffmpeg_buf: cfg.ffmpeg, ffprobe_buf: cfg.ffprobe }
+              ffmpeg_buf: cfg.ffmpeg, ffprobe_buf: cfg.ffprobe, update_action: None, closing: false }
     }
 }
 
@@ -153,6 +171,18 @@ impl eframe::App for Gui {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.selectable_label(self.show_settings, "⚙ Impostazioni").clicked() { self.show_settings = !self.show_settings; }
                     if ui.selectable_label(self.show_log, "Log").clicked() { self.show_log = !self.show_log; }
+                    match &a.update {
+                        UpdateState::Available(r) => {
+                            let b = egui::Button::new(RichText::new(format!("⬆ Aggiorna a {}", r.version)).strong().color(Color32::WHITE)).fill(Color32::from_rgb(50, 110, 190));
+                            let busy = !a.jobs.is_empty();
+                            let resp = ui.add_enabled(!busy, b).on_disabled_hover_text("Metti in pausa la coda e attendi la fine dell'encode in corso");
+                            if resp.clicked() { self.update_action = Some(UpdateAction::Install(r.clone())); }
+                        }
+                        UpdateState::Downloading { version, done, total } => {
+                            ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(160.0).text(format!("download {version}")));
+                        }
+                        _ => {}
+                    }
                     let (txt, col) = if a.running { ("⏸  Pausa", Color32::from_rgb(200, 150, 40)) } else { ("▶  Avvia coda", Color32::from_rgb(40, 140, 70)) };
                     if ui.add(egui::Button::new(RichText::new(txt).strong().color(Color32::WHITE)).fill(col).min_size([130.0, 28.0].into())).clicked() {
                         a.running = !a.running;
@@ -355,6 +385,18 @@ impl eframe::App for Gui {
             save_config(&a.cfg);
             self.last_cfg_save = std::time::Instant::now();
         }
+
+        // ---------- aggiornamenti ----------
+        if matches!(a.update, UpdateState::Installing) && !self.closing {
+            self.closing = true; // il setup attende la chiusura (mutex) e poi rilancia l'app
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        drop(a);
+        match self.update_action.take() {
+            Some(UpdateAction::Check) => update::spawn_check(self.st.clone()),
+            Some(UpdateAction::Install(r)) => update::spawn_install(self.st.clone(), r),
+            None => {}
+        }
     }
 }
 
@@ -495,6 +537,27 @@ impl Gui {
         if ui.button("Riscansiona ora").clicked() { rescan = true; }
         ui.add_space(8.0);
         ui.label(RichText::new(format!("Config: {}", cfg_path().display())).small().weak());
+
+        ui.separator();
+        ui.label(RichText::new(format!("hevctui {CURRENT}")).strong());
+        ui.checkbox(&mut a.cfg.auto_update_check, "Controlla aggiornamenti all'avvio");
+        ui.horizontal(|ui| {
+            let checking = matches!(a.update, UpdateState::Checking | UpdateState::Downloading { .. } | UpdateState::Installing);
+            if ui.add_enabled(!checking, egui::Button::new("Controlla ora")).clicked() { self.update_action = Some(UpdateAction::Check); }
+            let (txt, col) = match &a.update {
+                UpdateState::Idle => (String::new(), ui.visuals().weak_text_color()),
+                UpdateState::Checking => ("controllo…".into(), ui.visuals().weak_text_color()),
+                UpdateState::UpToDate => ("aggiornato".into(), Color32::from_rgb(90, 200, 110)),
+                UpdateState::Available(r) => (format!("disponibile {}", r.version), Color32::from_rgb(90, 160, 230)),
+                UpdateState::Downloading { done, total, .. } => (format!("download {}%", done * 100 / (*total).max(1)), Color32::from_rgb(90, 160, 230)),
+                UpdateState::Installing => ("avvio installazione…".into(), Color32::from_rgb(90, 160, 230)),
+                UpdateState::Error(e) => (e.clone(), Color32::from_rgb(230, 90, 80)),
+            };
+            ui.label(RichText::new(txt).small().color(col));
+        });
+        if let UpdateState::Available(r) = &a.update {
+            ui.hyperlink_to("note di rilascio", &r.page);
+        }
 
         if rescan { a.rescan_now = true; }
     }

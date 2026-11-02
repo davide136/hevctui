@@ -53,6 +53,7 @@ pub struct Config {
     pub encode_codecs: Vec<String>,
     pub ffmpeg: String,
     pub ffprobe: String,
+    pub auto_update_check: bool,
     // formato v3 originale (root + sottocartelle): letto solo per migrare in `folders`
     #[serde(skip_serializing)]
     pub root: String,
@@ -84,6 +85,7 @@ impl Default for Config {
             encode_codecs: strs(&["h264", "mpeg4", "vc1", "mpeg2video", "msmpeg4v3", "wmv3"]),
             ffmpeg: "ffmpeg".into(),
             ffprobe: "ffprobe".into(),
+            auto_update_check: true,
             root: String::new(),
             movie_dirs: vec![],
             series_dirs: vec![],
@@ -221,6 +223,7 @@ pub struct State {
     pub first_scan_done: bool,
     pub rescan_now: bool,
     pub log: VecDeque<String>,
+    pub update: crate::update::UpdateState,
 }
 pub type Shared = Arc<Mutex<State>>;
 
